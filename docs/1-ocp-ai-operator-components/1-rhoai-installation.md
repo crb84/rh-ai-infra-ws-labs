@@ -94,7 +94,7 @@ The `DataScienceCluster` (DSC) resource is the main configuration file where you
       feastoperator:
         managementState: Removed
       kserve:
-        managementState: Removed
+        managementState: Managed
       llamastackoperator:
         managementState: Removed
       kueue:
