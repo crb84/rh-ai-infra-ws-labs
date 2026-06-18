@@ -581,7 +581,7 @@ metadata:
     security.opendatahub.io/enable-auth: "false"
     serving.kserve.io/deploymentMode: RawDeployment
     opendatahub.io/hardware-profile-name: team2-genai-profile
-    opendatahub.io/hardware-profile-namespace: redhat-ods-applications
+    opendatahub.io/hardware-profile-namespace: team2-genai
 spec:
   predictor:
     automountServiceAccountToken: false
