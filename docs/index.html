@@ -234,7 +234,7 @@
       auto2top: true,
       executeScript: true,
       name: 'Red Hat Openshift AI Infrastructure Workshop 🚀',
-      repo: 'https://github.com/crb84/rh-ai-infra-ws-labs/tree/docs/2.2.4-dra-gpucluster',
+      repo: 'https://github.com/rh-ai-infra-ws/rh-ai-infra-ws-labs.git',
       loadSidebar: true,
       subMaxLevel: 0,
       sidebarDisplayLevel: 0,
@@ -333,88 +333,6 @@
           hook.afterEach(function(html) {
             // return applyDocPlaceholdersToHtml(html) + footer;
             return applyDocPlaceholdersToHtml(html);
-          });
-        },
-        function(hook, vm) {
-          // Keep the rendered page (preview) and the raw Markdown (source) on screen together.
-          var SOURCE_BRANCH = 'docs/2.2.4-dra-gpucluster';
-          var SOURCE_REPO = 'https://github.com/crb84/rh-ai-infra-ws-labs/blob/' + SOURCE_BRANCH + '/docs/';
-
-          function slugify(text) {
-            return text.toString().toLowerCase().trim()
-              .replace(/\s+/g, '-')
-              .replace(/[^\w\u00C0-\u024f\-]+/g, '')
-              .replace(/-+/g, '-')
-              .replace(/^-+|-+$/g, '');
-          }
-
-          function ensurePanel() {
-            var panel = document.getElementById('lab-source-panel');
-            if (panel) return panel;
-            panel = document.createElement('aside');
-            panel.id = 'lab-source-panel';
-            panel.setAttribute('aria-label', 'Markdown source');
-            panel.innerHTML =
-              '<div class="lab-source-bar">' +
-                '<span>Source</span>' +
-                '<span class="lab-source-actions">' +
-                  '<a id="lab-source-github" target="_blank" rel="noopener">GitHub</a>' +
-                  '<button type="button" id="lab-source-hide">Hide</button>' +
-                '</span>' +
-              '</div>' +
-              '<pre id="lab-source-pre"></pre>';
-            document.body.appendChild(panel);
-            var opener = document.createElement('button');
-            opener.id = 'lab-source-show';
-            opener.type = 'button';
-            opener.textContent = 'Source';
-            document.body.appendChild(opener);
-            document.getElementById('lab-source-hide').addEventListener('click', function() {
-              document.body.classList.remove('lab-source-open');
-            });
-            opener.addEventListener('click', function() {
-              document.body.classList.add('lab-source-open');
-            });
-            if (window.matchMedia('(min-width: 1200px)').matches) {
-              document.body.classList.add('lab-source-open');
-            }
-            return panel;
-          }
-
-          hook.doneEach(function() {
-            ensurePanel();
-            var file = (vm.route.file || 'README.md').replace(/^\//, '');
-            var pre = document.getElementById('lab-source-pre');
-            var github = document.getElementById('lab-source-github');
-            github.href = SOURCE_REPO + file;
-            pre.textContent = 'Loading ' + file + '…';
-            fetch(file)
-              .then(function(response) {
-                if (!response.ok) throw new Error(response.status);
-                return response.text();
-              })
-              .then(function(text) {
-                pre.textContent = text;
-                var wanted = '';
-                var query = (location.hash.split('?')[1] || '');
-                query.split('&').forEach(function(part) {
-                  if (part.indexOf('id=') === 0) wanted = decodeURIComponent(part.slice(3));
-                });
-                if (!wanted) return;
-                var lines = text.split('\n');
-                var line = 0;
-                for (var i = 0; i < lines.length; i++) {
-                  var match = /^(#{1,6})\s+(.*)$/.exec(lines[i]);
-                  if (match && slugify(match[2]) === slugify(wanted)) {
-                    line = i;
-                    break;
-                  }
-                }
-                pre.scrollTop = Math.max(0, line * 18 - 24);
-              })
-              .catch(function() {
-                pre.textContent = 'Could not load ' + file;
-              });
           });
         }
       ],
@@ -575,85 +493,6 @@
     .iframe-scroll-container {
       overflow-x: auto;
       width: 100%;
-    }
-
-    /* Preview (rendered page) and source (raw Markdown) side by side */
-    #lab-source-panel {
-      display: none;
-      position: fixed;
-      top: 0;
-      right: 0;
-      width: min(40vw, 560px);
-      height: 100vh;
-      z-index: 20;
-      background: #1b1b1b;
-      color: #f0f0f0;
-      border-left: 3px solid #cc0000;
-      box-sizing: border-box;
-    }
-    body.lab-source-open #lab-source-panel {
-      display: flex;
-      flex-direction: column;
-    }
-    body.lab-source-open .content {
-      margin-right: min(40vw, 560px);
-    }
-    .lab-source-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 8px 12px;
-      background: #111;
-      border-bottom: 1px solid #333;
-      font-size: 13px;
-    }
-    .lab-source-actions {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-    }
-    .lab-source-bar a,
-    .lab-source-bar button,
-    #lab-source-show {
-      font-size: 12px;
-      cursor: pointer;
-      background: #cc0000;
-      color: #fff;
-      border: 0;
-      border-radius: 3px;
-      padding: 6px 10px;
-      text-decoration: none;
-    }
-    #lab-source-pre {
-      margin: 0;
-      padding: 12px 14px 28px;
-      overflow: auto;
-      flex: 1;
-      font-size: 12px;
-      line-height: 18px;
-      white-space: pre;
-      tab-size: 2;
-      background: #1b1b1b;
-      color: #f0f0f0;
-    }
-    #lab-source-show {
-      display: none;
-      position: fixed;
-      top: 88px;
-      right: 12px;
-      z-index: 21;
-    }
-    body:not(.lab-source-open) #lab-source-show {
-      display: block;
-    }
-    @media (max-width: 1199px) {
-      #lab-source-panel {
-        width: 100vw;
-      }
-      body.lab-source-open .content {
-        margin-right: 0;
-      }
     }
   </style>
 </body>
