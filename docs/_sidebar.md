@@ -24,6 +24,7 @@
     * [2.2.1 Intelligent GPU Orchestration](2-accelerators-integration/2-gpu-as-a-service.md#intelligent-gpu-orchestration)
     * [2.2.2 Time Slicing (GPU sharing)](2-accelerators-integration/2-gpu-as-a-service.md#time-slicing-gpu-sharing-⏱️)
     * [2.2.3 Intelligent Scheduling](2-accelerators-integration/2-gpu-as-a-service.md#intelligent-scheduling)
+    * [2.2.4 DRA Driver and GPUCluster](2-accelerators-integration/2-gpu-as-a-service.md#dra-driver-and-gpucluster)
 
 * 🎢 Module 3 [Distributed Inference](3-distributed-inference/README.md)
   * [3.1. Review Openshift AI Components](3-distributed-inference/1-review-ocp-ai.md)

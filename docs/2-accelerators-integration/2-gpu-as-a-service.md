@@ -8,6 +8,8 @@ GPU-as-a-Service is a fundamental approach for maximizing the efficiency and sec
 
 - Enhanced Scheduling: Intelligent scheduling tools like Kueue further optimize resource management. Kueue actively manages resource quotas and prioritizes mission-critical workloads, ensuring optimal utilization and guaranteed access for a diverse range of AI/ML tasks.
 
+- DRA (`GPUCluster`): The NVIDIA DRA driver is the newer alternative to the device plugin. It publishes each GPU as a `ResourceSlice` and workloads claim a device class (`gpu.nvidia.com`) instead of a count of `nvidia.com/gpu`. Section 2.2.4 walks through that model and the migration off `ClusterPolicy`.
+
 ## Intelligent GPU Orchestration
 
 A key strategy is needed to prevent non-AI workloads from inadvertently using GPU nodes, while also allowing users to select specific hardware profiles (such as an NVIDIA L4 or A100) to match their model's computational demands. Red Hat OpenShift, together with Red Hat OpenShift AI, provides the necessary mechanisms—including node taints, tolerations, custom labels and hardware profiles to define and enforce a solution for this challenge.
@@ -785,3 +787,264 @@ Here are the key capabilities and functions of Kueue in RHOAI:
 *   **Deep Integration with AI Frameworks** 🔗 - Kueue integrates seamlessly with underlying Kubernetes objects (Pods, Jobs, JobSets) as well as the frameworks used in RHOAI for distributed workloads, such as KubeRay (for Ray clusters) and the Kubeflow Training Operator (for PyTorch workloads). 
 
 Administrators can link RHOAI **Hardware Profiles** directly to a Kueue *LocalQueue* to automatically assign these resource governance rules to specific hardware configurations requested by users. Furthermore, administrators can monitor Kueue's behavior through specific alerts, such as when workloads are pending for too long or when resource reservations excessively exceed the quota.
+
+## DRA Driver and GPUCluster
+
+### What is Dynamic Resource Allocation (DRA)
+**Dynamic Resource Allocation (DRA)** is a Kubernetes API (`resource.k8s.io/v1` on OpenShift 4.21) that provides a flexible way to request, configure, and share specialized hardware like GPUs. The GPU Operator procedure for this driver is [DRA Driver for NVIDIA GPUs](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html).
+
+Instead of nodes advertising a simple integer count of GPUs (`nvidia.com/gpu`), the **NVIDIA DRA driver** publishes individual devices with detailed attributes (model, memory, UUID) via `ResourceSlice` objects. Pods then request specific hardware using `ResourceClaim` or `ResourceClaimTemplate` objects and CEL (Common Expression Language) filters, with container injection handled via Container Device Interface (CDI) in CRI-O.
+
+### How Openshift Selects and Injects a GPU with DRA
+When a user requests "one GPU" on a node (e.g., among `gpu-0`, `gpu-1`, and `gpu-2`), the end-to-end allocation lifecycle follows six steps:
+
+1. **Discovery:** The NVIDIA DRA plugin uses NVML (NVIDIA Management Library) to discover physical GPUs on the node and read their hardware properties.
+2. **Publication:** The plugin publishes `ResourceSlice` objects through the Kubernetes API, providing the scheduler with a live inventory of devices and their attributes.
+3. **Request:** The user creates a `ResourceClaim` (e.g., `my-gpu`) or `ResourceClaimTemplate` requesting a device of class `gpu.nvidia.com`, and the Pod references that claim in its container spec.
+4. **Selection:** `kube-scheduler` matches the claim against the published `ResourceSlice` inventory, accounts for GPUs already allocated to other claims, and selects a specific device (e.g., `gpu-2`) on an eligible node.
+5. **Allocation and Binding:** The scheduler records the selected driver, pool, and device name inside `ResourceClaim.status.allocation` and binds the Pod to the chosen node.
+6. **Startup (CDI Injection):** On the target node, `kubelet` instructs the NVIDIA DRA plugin to prepare the device; the plugin generates a Container Device Interface (CDI) specification and passes the CDI device names to the container runtime (`containerd` or CRI-O) to mount `gpu-2` into the starting container.
+
+> **Note:** A cluster can run either `ClusterPolicy` (Device Plugin stack) or `GPUCluster` (DRA stack), but **never both simultaneously**. An in-place upgrade is not supported; you must tear down `ClusterPolicy` before deploying `GPUCluster`.
+
+---
+
+The migration in this guide is the supported order: remove `ClusterPolicy`, wait until only `gpu-operator` remains, then create `GPUCluster` and `NVIDIADriver`.
+
+
+### Remove ClusterPolicy and reach a clean state
+1. **Back up your existing `ClusterPolicy` and delete active GPU workloads** requesting `nvidia.com/gpu`:
+```bash
+oc get clusterpolicy -o json > clusterpolicy_backup.json
+```
+2. **Delete the `ClusterPolicy`:**
+```bash
+oc delete -f clusterpolicy.json
+```
+3. **Wait for all operands to terminate** (`nvidia-driver-daemonset`, `nvidia-device-plugin-daemonset`, `nvidia-container-toolkit-daemonset`, `GPU Feature Discovery`, `DCGM`, etc.):
+```bash
+oc get pods -n nvidia-gpu-operator -w
+```
+4. **Verify a clean state** (only the `gpu-operator` controller pod should remain; all DaemonSets and policies must be gone):
+```bash
+oc get pods -n nvidia-gpu-operator
+NAME                            READY   STATUS    RESTARTS   AGE
+gpu-operator-64d67f8d55-bsjd7   1/1     Running   0          160m
+
+oc get ds -n nvidia-gpu-operator
+oc get clusterpolicy
+```
+
+### Create GPUCluster
+
+
+`GPUCluster` is a cluster-scoped singleton (must be named `gpu-cluster`) that deploys the DRA driver (`gpu.nvidia.com`, `mig.nvidia.com`, `vfio.gpu.nvidia.com`), ComputeDomain controller/plugin, DRA validator, and DCGM Exporter.
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: nvidia.com/v1alpha1
+kind: GPUCluster
+metadata:
+  name: gpu-cluster
+spec:
+  draDriver:
+    computeDomains:
+      enabled: true
+  dcgm:
+    enabled: false
+  dcgmExporter:
+    enabled: true
+EOF
+```
+
+### Create NVIDIADriver
+Because `GPUCluster` does not install host drivers, create an `NVIDIADriver` custom resource (requires driver branch 580 or later for DRA). Leave `nodeSelector` unset so the operator automatically targets `nvidia.com/gpu.present=true`.
+
+```bash
+cat <<'EOF' | oc apply -f -
+apiVersion: nvidia.com/v1alpha1
+kind: NVIDIADriver
+metadata:
+  name: gpu-driver
+  namespace: nvidia-gpu-operator
+spec:
+  default: true
+  driverType: gpu
+  repository: nvcr.io/nvidia
+  image: driver
+  version: sha256:e243d778bd83de47668e7629d78f673317a130fedc99941be12aad7fc6bdfa85
+EOF
+```
+
+### Validate DRA
+
+**Check resource readiness and `DeviceClass` creation**
+
+Wait until both objects are `ready` and the DRA driver has published its inventory. The first driver start compiles against the node kernel and takes several minutes.
+
+```bash
+oc get gpucluster gpu-cluster
+oc get nvidiadriver -n nvidia-gpu-operator
+oc get pods -n nvidia-gpu-operator
+oc get deviceclass
+oc get resourceslice
+```
+
+?> ✅ `gpu-cluster` and `gpu-driver` show `ready`. The namespace is running `nvidia-dra-driver-controller`, `nvidia-dra-driver-kubelet-plugin` (2/2), `nvidia-dra-validator`, `nvidia-dcgm-exporter-dra`, and `nvidia-gpu-driver-rhel9-*`. `oc get deviceclass` includes `gpu.nvidia.com`. A `ResourceSlice` lists the GPUs on the worker (`driver: gpu.nvidia.com`).
+
+```text
+NAME          STATUS   AGE
+gpu-cluster   ready    6m
+
+NAME         STATUS   DEFAULT   AGE
+gpu-driver   ready    true      6m
+
+NAME                                        AGE
+gpu.nvidia.com                              6m
+mig.nvidia.com                              6m
+vfio.gpu.nvidia.com                         6m
+compute-domain-daemon.nvidia.com            6m
+compute-domain-default-channel.nvidia.com   6m
+```
+
+**Deploy a test pod using a `ResourceClaimTemplate`:**
+```bash
+oc new-project dra-gpu-test
+
+cat <<'EOF' | oc apply -f -
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: single-gpu
+  namespace: dra-gpu-test
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.nvidia.com
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-pod
+  namespace: dra-gpu-test
+spec:
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+  - name: nvidia-smi
+    image: nvcr.io/nvidia/k8s/cuda-sample:vectoradd-cuda12.5.0-ubi8
+    command: ["bash", "-c", "nvidia-smi -L && sleep 3600"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      runAsNonRoot: true
+      capabilities:
+        drop: ["ALL"]
+      seccompProfile:
+        type: RuntimeDefault
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: single-gpu
+EOF
+```
+**Verify allocation (`ResourceClaim.status.allocation`) and clean up:**
+```bash
+oc logs -n dra-gpu-test gpu-pod
+oc get resourceclaim -n dra-gpu-test -o yaml
+oc delete project dra-gpu-test
+```
+
+
+
+### DRA (`GPUCluster`) versus `ClusterPolicy`
+
+
+**ClusterPolicy** and **DRA with GPUCluster** are two ways to hand a GPU to a pod. The resource the scheduler sees is different, and so is the pod spec.
+
+- **ClusterPolicy**
+
+The operator installs the driver, the device plugin, and the container toolkit.
+
+The node publishes a count, for example `nvidia.com/gpu: 4` when it has four A10G cards. The pod asks for one unit:
+
+```yaml
+resources:
+  limits:
+    nvidia.com/gpu: 1
+```
+
+The scheduler subtracts one from that count. It does not pick a specific card: it does not know the model, the memory, or the UUID. Asking for "an L4" or "an A10G" means labeling the node and using a `nodeSelector`.
+
+- **DRA and GPUCluster**
+
+**DRA** is the Openshift API for requesting a specific device. **GPUCluster** is the object the GPU Operator uses to install the DRA driver.
+
+That driver publishes each GPU in a `ResourceSlice`, with its model, memory, and UUID, and it creates the device class `gpu.nvidia.com`.
+
+The pod does not ask for a number. It points at a `ResourceClaim`:
+
+```yaml
+resourceClaims:
+- name: gpu
+  resourceClaimTemplateName: single-gpu
+```
+
+The scheduler searches those lists for a free GPU that matches the request, reserves it, and CRI-O injects it into the container. **GPUCluster** does not install the NVIDIA driver. An `NVIDIADriver` does that.
+
+A comparison of both driver models is shown in this table.
+
+| | `ClusterPolicy` | DRA (`GPUCluster`) |
+| --- | --- | --- |
+| **Resource model** | The device plugin adds a count, `nvidia.com/gpu`, to the node. Four A10G cards show up as `nvidia.com/gpu: 4`. The scheduler subtracts one per request. | The DRA driver publishes one `ResourceSlice` per GPU node. Each device carries product name, memory, and UUID. The device class is `gpu.nvidia.com`. |
+| **Pod specification** | `resources.limits["nvidia.com/gpu"]` and the same value under `requests`. | `spec.resourceClaims` points at a `ResourceClaim` or a `ResourceClaimTemplate`. The container lists that claim under `resources.claims`. |
+| **Device selection** | GPU Feature Discovery labels the node (`nvidia.com/gpu.product`). A Hardware Profile or a `nodeSelector` picks the model. | A CEL expression on the claim filters the slice (`productName`, memory, UUID). The same template expresses "any GPU" or "an A10G". |
+| **Sharing, MIG, and time-slicing** | Time-slicing raises the advertised count above the number of cards. MIG Manager partitions Ampere and newer GPUs before allocation. Both are configured on `ClusterPolicy`. | One claim can be shared by several containers or pods. Scheduler-accounted sharing (`ConsumableShares`), MIG creation at claim time (`DynamicMIG`), and MPS are alpha and off by default. Preconfigured MIG devices are allocated through `mig.nvidia.com`. |
+| **Health monitoring** | The device plugin stops advertising a GPU it has marked unhealthy. | `NVMLDeviceHealthCheck` is alpha and disabled. The gRPC probe reports that the kubelet plugin is up. DCGM still exports telemetry. |
+| **What the operator runs** | Driver DaemonSet, container toolkit, device plugin, GPU Feature Discovery, MIG Manager, validator, and optional KubeVirt or vGPU components. | `NVIDIADriver` for the driver. `GPUCluster` for the DRA kubelet plugin, the DRA validator, and DCGM Exporter. Injection is CDI in CRI-O. |
+| **Quotas on OpenShift 4.21** | `ResourceQuota` counts `requests.nvidia.com/gpu`. | Quota can count `gpu.nvidia.com.deviceclass.resource.k8s.io/devices`. Hardware Profiles in the current lab still request `nvidia.com/gpu`. |
+
+#### When to keep `ClusterPolicy`
+
+Use `ClusterPolicy` when:
+
+* The workload only needs a count of GPUs,
+* Existing manifests and Hardware Profiles already request `nvidia.com/gpu`,
+* Time-slicing, MIG Manager, or device-plugin health are part of the design. That is the stack `clusterpolicy.json` installs, and it is the path to restore if this migration is rolled back.
+
+#### When to use DRA
+
+Use `GPUCluster` when:
+
+* The workload must name the GPU in the claim
+* One claim is shared across containers or pods
+* Scheduling should read the device inventory (`ResourceSlice`) instead of a node count. On OpenShift 4.21 that API is `resource.k8s.io/v1` and needs no feature gate.
+
+
+---
+
+### Restore: Remove DRA and restore ClusterPolicy
+To roll back to the Device Plugin stack, perform the reverse teardown so both stacks never overlap:
+
+1. **Delete DRA workloads and user-created `ResourceClaim` objects** across namespaces so claims unprepare cleanly.
+2. **Delete the `GPUCluster` and `NVIDIADriver` resources:**
+```bash
+oc delete gpucluster gpu-cluster
+oc delete nvidiadriver gpu-driver -n nvidia-gpu-operator
+```
+3. **Wait for a clean state** (verify only `gpu-operator` is running and `DeviceClass` resources are gone):
+```bash
+oc get pods -n nvidia-gpu-operator -w
+oc get deviceclass
+```
+4. **Restore the backed-up `ClusterPolicy`:**
+```bash
+oc apply -f clusterpolicy_backup.json
+oc get clusterpolicy
+```
